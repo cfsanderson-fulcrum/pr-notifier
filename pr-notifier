@@ -36,15 +36,13 @@ notify() {
   local message="$2"
   local url="${3:-}"
 
-  # Escape double-quotes for osascript
-  title="${title//\"/\\\"}"
-  message="${message//\"/\\\"}"
-
-  if [[ -n "$url" ]]; then
-    osascript -e "display notification \"${message}\" with title \"${title}\" sound name \"Glass\"" \
-              -e "delay 0.1"
+  if [[ -n "$url" ]] && command -v terminal-notifier &>/dev/null; then
+    terminal-notifier -title "$title" -message "$message" -open "$url" -sound Glass -group "pr-notifier"
   else
-    osascript -e "display notification \"${message}\" with title \"${title}\" sound name \"Glass\""
+    # Escape double-quotes for osascript
+    local t="${title//\"/\\\"}"
+    local m="${message//\"/\\\"}"
+    osascript -e "display notification \"${m}\" with title \"${t}\" sound name \"Glass\""
   fi
 
   log "NOTIFY: ${title} — ${message}"

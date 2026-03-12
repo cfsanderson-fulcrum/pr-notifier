@@ -6,19 +6,22 @@
   <string>com.user.pr-notifier</string>
   <key>ProgramArguments</key>
   <array>
-    <!-- Update this path to where you cloned the repo -->
-    <string>/Users/YOUR_USERNAME/pr-notifier/pr-notifier</string>
+    <string>/Users/caleb/Projects/pr-notifier/pr-notifier</string>
   </array>
   <key>StartInterval</key>
   <integer>120</integer>
   <key>StandardOutPath</key>
-  <string>/Users/YOUR_USERNAME/.local/share/pr-notifier/launchd-stdout.log</string>
+  <string>/Users/caleb/.local/share/pr-notifier/launchd-stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOUR_USERNAME/.local/share/pr-notifier/launchd-stderr.log</string>
+  <string>/Users/caleb/.local/share/pr-notifier/launchd-stderr.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>GITHUB_USER</key>
+    <string>cfsanderson-fulcrum</string>
+    <key>GITHUB_ORG</key>
+    <string>fulcrumapp</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

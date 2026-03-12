@@ -46,19 +46,28 @@ It does **not** notify for:
    To persist these, add the exports to your shell profile (`~/.zshrc`,
    `~/.bashrc`, etc.) or to the launchd plist (see below).
 
-3. Make it executable:
+3. Install `terminal-notifier` for clickable notifications (recommended):
+
+   ```sh
+   brew install terminal-notifier
+   ```
+
+   Without it, notifications still work via macOS built-in alerts but
+   clicking them won't open the PR in your browser.
+
+4. Make it executable:
 
    ```sh
    chmod +x pr-notifier
    ```
 
-4. Create the state directory:
+5. Create the state directory:
 
    ```sh
    mkdir -p ~/.local/share/pr-notifier
    ```
 
-5. Install the launchd agent to run it automatically every 2 minutes:
+6. Install the launchd agent to run it automatically every 2 minutes:
 
    ```sh
    # Copy the example plist and fill in your paths
