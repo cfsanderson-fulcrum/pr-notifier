@@ -9,14 +9,25 @@ launchd (every 120s)
   └─ pr-notifier (bash)
        ├─ gh api search/issues  ←── single call finds all open PRs in the org
        │
-       └─ for each PR:
-            ├─ gh pr view          ←── get head SHA, review decision, draft status
-            ├─ gh pr checks        ←── get CI check run statuses
-            ├─ gh api .../reviews  ←── get review submissions
-            ├─ gh api .../comments ←── get issue comments
+       ├─ for each PR:
+       │    ├─ gh pr view          ←── get head SHA, review decision, draft status
+       │    ├─ gh pr checks        ←── get CI check run statuses
+       │    ├─ gh api .../reviews  ←── get review submissions
+       │    ├─ gh api .../comments ←── get issue comments
+       │    │
+       │    ├─ compare against state.json
+       │    ├─ notify() on changes  ──→ osascript (macOS notification)
+       │    └─ update state.json
+       │
+       └─ watched PRs (label + review-requested):
+            ├─ gh api search/issues × N  ←── one call per watched label (OR)
+            ├─ gh api search/issues      ←── review-requested:{user}
             │
-            ├─ compare against state.json
-            ├─ notify() on changes  ──→ osascript (macOS notification)
+            ├─ union label results, compare with previous state
+            ├─ notify on new additions (labeled or review-requested)
+            ├─ for disappeared PRs:
+            │    ├─ gh pr view --json state  ←── check if closed/merged
+            │    └─ notify if closed/merged, else silently drop
             └─ update state.json
 ```
 
@@ -36,6 +47,45 @@ parameters as a POST body, which the search endpoint rejects with a 404.
 The search API has a rate limit of 30 requests/minute, but we only make 1 per
 poll cycle for discovery.
 
+## Watched PRs (label + review-requested)
+
+After processing authored PRs, the script runs a second discovery phase for
+PRs matching watched labels or requesting your review.
+
+### Label OR semantics
+
+GitHub's search API treats multiple `label:` qualifiers as AND (all must
+match). To achieve OR (any label matches), the script runs one search per
+label and unions the results by PR number using `jq unique_by(.number)`.
+
+### Scoping
+
+The `WATCHED_REPO` variable scopes queries to a single repo (e.g.,
+`repo:fulcrumapp/fulcrum`). If `WATCHED_REPO` is empty and `WATCHED_ORG` is
+set, it uses `org:{org}` instead for org-wide monitoring.
+
+### New/disappeared detection
+
+The script stores the full set of matched PRs (as JSON arrays) in state.json
+under `watched_labeled_prs` and `watched_review_prs`. Each poll cycle:
+
+1. Fetches the current sets
+2. Compares PR numbers against the previous sets
+3. **New PRs** → notification (🏷️ for labels, 👀 for review-requested)
+4. **Disappeared PRs** → fetches the PR state via `gh pr view --json state`:
+   - `CLOSED` or `MERGED` → notification (✅ or 🎉)
+   - Still `OPEN` → label was removed or review dismissed; silently dropped
+
+### API calls
+
+| Call | Count | Purpose |
+|---|---|---|
+| `search/issues` (labels) | L (one per label) | Find labeled PRs |
+| `search/issues` (reviews) | 1 | Find review-requested PRs |
+| `gh pr view` (closures) | D (one per disappeared PR) | Check if closed/merged |
+
+With 2 watched labels and no disappearances, that's 3 extra calls per cycle.
+
 ## State tracking
 
 All state is stored in `~/.local/share/pr-notifier/state.json` as a flat
@@ -50,6 +100,13 @@ key-value map. Keys are namespaced by `{owner/repo}#{pr_number}_{field}`.
 | `_last_review_id` | Numeric ID | Only process reviews newer than this |
 | `_last_comment_id` | Numeric ID | Only process comments newer than this |
 | `_ready_to_merge` | `true` / `false` | Avoid repeat "ready" notifications |
+
+### Tracked fields for watched PRs
+
+| Key | Value | Purpose |
+|---|---|---|
+| `watched_labeled_prs` | JSON array of `{number, title, url, repo}` | Track label-matched PR set |
+| `watched_review_prs` | JSON array of `{number, title, url, repo}` | Track review-requested PR set |
 
 ### State transitions
 
@@ -98,15 +155,19 @@ For N open PRs, each cycle makes:
 
 | Call | Count | Purpose |
 |---|---|---|
-| `search/issues` | 1 | Find all open PRs |
+| `search/issues` | 1 | Find all open authored PRs |
 | `gh pr view` | N | Get SHA, reviewDecision, isDraft |
 | `gh pr checks` | N | Get CI check statuses |
 | `repos/.../reviews` | N | Get review submissions |
 | `repos/.../comments` | N | Get issue comments |
+| `search/issues` (labels) | L | Find watched-label PRs (one per label) |
+| `search/issues` (reviews) | 1 | Find review-requested PRs |
+| `gh pr view` (closures) | D | Check disappeared PRs (typically 0) |
 
-**Total: 4N + 1 API calls per cycle.** With 9 open PRs, that's 37 calls
-every 2 minutes. GitHub's authenticated rate limit is 5,000/hour, so this
-uses about 1,110/hour — well within limits.
+**Total: 4N + L + D + 2 API calls per cycle.** With 9 open PRs, 2 watched
+labels, and no disappearances, that's 40 calls every 2 minutes. GitHub's
+authenticated rate limit is 5,000/hour, so this uses about 1,200/hour — well
+within limits.
 
 ## Logging
 

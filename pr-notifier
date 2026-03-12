@@ -2,12 +2,28 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-GITHUB_USER=""
-GITHUB_ORG=""
-STATE_DIR="${HOME}/.local/share/pr-notifier"
+# All settings can be overridden via environment variables.
+GITHUB_USER="${GITHUB_USER:-}"
+GITHUB_ORG="${GITHUB_ORG:-}"
+STATE_DIR="${PR_NOTIFIER_STATE_DIR:-${HOME}/.local/share/pr-notifier}"
 STATE_FILE="${STATE_DIR}/state.json"
 LOG_FILE="${STATE_DIR}/pr-notifier.log"
-MAX_LOG_LINES=500
+MAX_LOG_LINES="${PR_NOTIFIER_MAX_LOG_LINES:-500}"
+
+# ─── Watched PRs ──────────────────────────────────────────────────────────────
+# Monitor PRs with these labels (OR — any label matches).
+# Override via PR_NOTIFIER_WATCHED_LABELS (comma-separated).
+# Set to empty to disable label watching.
+if [[ -n "${PR_NOTIFIER_WATCHED_LABELS+x}" ]]; then
+  IFS=',' read -ra WATCHED_LABELS <<< "$PR_NOTIFIER_WATCHED_LABELS"
+else
+  WATCHED_LABELS=("design" "hold/design")
+fi
+
+# Repo to watch for labeled/review-requested PRs.
+# To watch an entire org instead, clear this and set WATCHED_ORG.
+WATCHED_REPO="${PR_NOTIFIER_WATCHED_REPO:-fulcrumapp/fulcrum}"
+WATCHED_ORG="${PR_NOTIFIER_WATCHED_ORG:-}"
 
 # Service accounts that are technically "User" type but are automation.
 # Add any other non-human accounts here.
@@ -267,5 +283,118 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   set_state "${state_prefix}_ready_to_merge" "$is_ready"
 
 done
+
+# ─── 5. Watched PRs: label + review-requested monitoring ─────────────────────
+
+watch_scope=""
+if [[ -n "$WATCHED_REPO" ]]; then
+  watch_scope="repo:${WATCHED_REPO}"
+elif [[ -n "$WATCHED_ORG" ]]; then
+  watch_scope="org:${WATCHED_ORG}"
+fi
+
+if [[ -n "$watch_scope" ]]; then
+
+  # ── 5a. Query for labeled PRs (OR across labels) ──────────────────────────
+  labeled_prs="[]"
+  if (( ${#WATCHED_LABELS[@]} > 0 )); then
+    for label in "${WATCHED_LABELS[@]}"; do
+      result=$(gh api -X GET "search/issues" \
+        -f q="is:pr is:open ${watch_scope} label:\"${label}\"" \
+        -f per_page=50 \
+        --jq '[.items[] | {
+          number: .number,
+          title: .title,
+          url: .html_url,
+          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+        }]' \
+        2>/dev/null || echo "[]")
+      # Union by PR number (deduplicate)
+      labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by(.number)')
+    done
+    log "Watched labels: found $(echo "$labeled_prs" | jq 'length') open PRs"
+  fi
+
+  # ── 5b. Query for review-requested PRs ────────────────────────────────────
+  review_prs=$(gh api -X GET "search/issues" \
+    -f q="is:pr is:open ${watch_scope} review-requested:${GITHUB_USER}" \
+    -f per_page=50 \
+    --jq '[.items[] | {
+      number: .number,
+      title: .title,
+      url: .html_url,
+      repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+    }]' \
+    2>/dev/null || echo "[]")
+  log "Watched review-requested: found $(echo "$review_prs" | jq 'length') open PRs"
+
+  # ── 5c. Compare with previous state and notify ────────────────────────────
+
+  prev_labeled=$(get_state "watched_labeled_prs")
+  prev_labeled=${prev_labeled:-"[]"}
+  prev_review=$(get_state "watched_review_prs")
+  prev_review=${prev_review:-"[]"}
+
+  prev_labeled_nums=$(echo "$prev_labeled" | jq '[.[].number]')
+  prev_review_nums=$(echo "$prev_review" | jq '[.[].number]')
+  curr_labeled_nums=$(echo "$labeled_prs" | jq '[.[].number]')
+  curr_review_nums=$(echo "$review_prs" | jq '[.[].number]')
+
+  # New labeled PRs
+  echo "$labeled_prs" | jq -c '.[]' | while IFS= read -r pr; do
+    num=$(echo "$pr" | jq -r '.number')
+    if ! echo "$prev_labeled_nums" | jq -e "index(${num})" &>/dev/null; then
+      pr_title=$(echo "$pr" | jq -r '.title')
+      pr_url=$(echo "$pr" | jq -r '.url')
+      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+    fi
+  done
+
+  # New review-requested PRs
+  echo "$review_prs" | jq -c '.[]' | while IFS= read -r pr; do
+    num=$(echo "$pr" | jq -r '.number')
+    if ! echo "$prev_review_nums" | jq -e "index(${num})" &>/dev/null; then
+      pr_title=$(echo "$pr" | jq -r '.title')
+      pr_url=$(echo "$pr" | jq -r '.url')
+      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+    fi
+  done
+
+  # ── 5d. Closure/merge detection ───────────────────────────────────────────
+  # Union previous labeled + review sets, compare with current union.
+  # PRs that disappeared might be closed/merged.
+
+  prev_all=$(echo "$prev_labeled" "$prev_review" | jq -s 'add | unique_by(.number)')
+  curr_all=$(echo "$labeled_prs" "$review_prs" | jq -s 'add | unique_by(.number)')
+  curr_all_nums=$(echo "$curr_all" | jq '[.[].number]')
+
+  echo "$prev_all" | jq -c '.[]' | while IFS= read -r pr; do
+    num=$(echo "$pr" | jq -r '.number')
+    if ! echo "$curr_all_nums" | jq -e "index(${num})" &>/dev/null; then
+      repo=$(echo "$pr" | jq -r '.repo')
+      pr_title=$(echo "$pr" | jq -r '.title')
+      pr_url=$(echo "$pr" | jq -r '.url')
+      short_repo=$(echo "$repo" | cut -d/ -f2)
+
+      # Check if the PR was closed/merged (not just unlabeled)
+      pr_state=$(gh pr view "$num" --repo "$repo" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+
+      if [[ "$pr_state" == "CLOSED" || "$pr_state" == "MERGED" ]]; then
+        state_emoji="✅"
+        [[ "$pr_state" == "MERGED" ]] && state_emoji="🎉"
+        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+      else
+        log "PR ${repo}#${num} left watched set (label removed or review dismissed)"
+      fi
+    fi
+  done
+
+  # ── 5e. Update state ──────────────────────────────────────────────────────
+  set_state "watched_labeled_prs" "$(echo "$labeled_prs" | jq -c '.')"
+  set_state "watched_review_prs" "$(echo "$review_prs" | jq -c '.')"
+
+fi
 
 log "Poll cycle complete"

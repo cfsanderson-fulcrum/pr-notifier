@@ -13,13 +13,17 @@ Polls GitHub every 2 minutes and sends a macOS notification when:
 - **Someone leaves a review comment** on your PR
 - **Someone comments** on your PR (human-only, bots filtered out)
 - **A PR becomes ready to merge** (CI green + approved + not draft)
+- **A PR is labeled** with a watched label (e.g., `design`, `hold/design`)
+- **You are added as a reviewer** on a PR in a watched repo
+- **A watched PR is closed or merged** (from either the label or reviewer set)
 
 It does **not** notify for:
 
 - Bot/automation comments (`dependabot[bot]`, `github-actions[bot]`, etc.)
 - Approvals
 - Your own comments or reviews
-- PRs that aren't yours
+- PRs that aren't yours (unless they match watched labels or request your review)
+- Label removals or review-request dismissals (silently dropped)
 
 ## Prerequisites
 
@@ -31,13 +35,16 @@ It does **not** notify for:
 
 1. Clone or copy this repo somewhere on your machine (e.g. `~/pr-notifier`).
 
-2. Configure the script — edit the top of `pr-notifier` and set `GITHUB_USER`
-   and `GITHUB_ORG`:
+2. Configure your GitHub identity. You can either export environment variables
+   (recommended) or edit the top of the `pr-notifier` script directly:
 
    ```sh
-   GITHUB_USER="your-github-username"
-   GITHUB_ORG="your-org"
+   export GITHUB_USER="your-github-username"
+   export GITHUB_ORG="your-org"
    ```
+
+   To persist these, add the exports to your shell profile (`~/.zshrc`,
+   `~/.bashrc`, etc.) or to the launchd plist (see below).
 
 3. Make it executable:
 
@@ -98,17 +105,21 @@ cat ~/.local/share/pr-notifier/launchd-stderr.log
 
 ## Configuration
 
-Edit the top of `pr-notifier`:
+All settings can be overridden via environment variables. Defaults are in the
+script and work out of the box for most Fulcrum team members.
 
-| Variable | Purpose |
-|---|---|
-| `GITHUB_USER` | Your GitHub username |
-| `GITHUB_ORG` | The GitHub org to monitor |
-| `IGNORED_USERS` | Array of usernames to treat as bots |
-| `MAX_LOG_LINES` | Log file rotation threshold (default: 500) |
+| Env variable | Script default | Purpose |
+|---|---|---|
+| `GITHUB_USER` | _(none — required)_ | Your GitHub username |
+| `GITHUB_ORG` | _(none — required)_ | The GitHub org to monitor for your authored PRs |
+| `PR_NOTIFIER_WATCHED_LABELS` | `design,hold/design` | Comma-separated labels to watch (OR logic). Set to empty to disable |
+| `PR_NOTIFIER_WATCHED_REPO` | `fulcrumapp/fulcrum` | Specific repo to watch for labels/reviews |
+| `PR_NOTIFIER_WATCHED_ORG` | _(empty)_ | Org to watch for labels/reviews (used if watched repo is empty) |
+| `PR_NOTIFIER_STATE_DIR` | `~/.local/share/pr-notifier` | Directory for state and log files |
+| `PR_NOTIFIER_MAX_LOG_LINES` | `500` | Log file rotation threshold |
 
-The poll interval (default: 120s) is set in the launchd plist under
-`StartInterval`.
+`IGNORED_USERS` and the poll interval (launchd `StartInterval`) are configured
+in the script and plist respectively.
 
 ## File locations
 
