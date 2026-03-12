@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+GITHUB_USER=""
+GITHUB_ORG=""
+STATE_DIR="${HOME}/.local/share/pr-notifier"
+STATE_FILE="${STATE_DIR}/state.json"
+LOG_FILE="${STATE_DIR}/pr-notifier.log"
+MAX_LOG_LINES=500
+
+# Service accounts that are technically "User" type but are automation.
+# Add any other non-human accounts here.
+IGNORED_USERS=("dependabot[bot]" "github-actions[bot]" "renovate[bot]")
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+notify() {
+  local title="$1"
+  local message="$2"
+  local url="${3:-}"
+
+  # Escape double-quotes for osascript
+  title="${title//\"/\\\"}"
+  message="${message//\"/\\\"}"
+
+  if [[ -n "$url" ]]; then
+    osascript -e "display notification \"${message}\" with title \"${title}\" sound name \"Glass\"" \
+              -e "delay 0.1"
+  else
+    osascript -e "display notification \"${message}\" with title \"${title}\" sound name \"Glass\""
+  fi
+
+  log "NOTIFY: ${title} — ${message}"
+}
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+  # Trim log file if too big
+  if [[ -f "$LOG_FILE" ]] && (( $(wc -l < "$LOG_FILE") > MAX_LOG_LINES )); then
+    tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+  fi
+}
+
+is_ignored_user() {
+  local user="$1"
+  for ignored in "${IGNORED_USERS[@]}"; do
+    if [[ "$user" == "$ignored" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+get_state() {
+  local key="$1"
+  if [[ -f "$STATE_FILE" ]]; then
+    jq -r --arg k "$key" '.[$k] // ""' "$STATE_FILE" 2>/dev/null || echo ""
+  else
+    echo ""
+  fi
+}
+
+set_state() {
+  local key="$1"
+  local value="$2"
+  if [[ ! -f "$STATE_FILE" ]]; then
+    echo '{}' > "$STATE_FILE"
+  fi
+  local tmp
+  tmp=$(jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$STATE_FILE")
+  echo "$tmp" > "$STATE_FILE"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+mkdir -p "$STATE_DIR"
+
+if ! command -v gh &>/dev/null; then
+  log "ERROR: gh CLI not found"
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+  log "ERROR: jq not found"
+  exit 1
+fi
+
+log "Starting poll cycle for org: ${GITHUB_ORG}"
+
+# Single API call to find all open PRs authored by us across the entire org.
+# This avoids iterating 100+ repos individually.
+# -X GET is required so gh sends the params as query parameters, not a POST body.
+search_json=$(gh api -X GET "search/issues" \
+  -f q="is:pr is:open author:${GITHUB_USER} org:${GITHUB_ORG}" \
+  -f per_page=50 \
+  --jq '[.items[] | {
+    number: .number,
+    title: .title,
+    url: .html_url,
+    repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]),
+    is_draft: .draft
+  }]' \
+  2>/dev/null || echo "[]")
+
+pr_count=$(echo "$search_json" | jq 'length')
+log "Found ${pr_count} open PRs across ${GITHUB_ORG}"
+
+echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
+  repo=$(echo "$pr" | jq -r '.repo')
+  pr_number=$(echo "$pr" | jq -r '.number')
+  pr_title=$(echo "$pr" | jq -r '.title')
+  pr_url=$(echo "$pr" | jq -r '.url')
+  is_draft=$(echo "$pr" | jq -r '.is_draft')
+  state_prefix="${repo}#${pr_number}"
+
+  # Get full PR details (search API doesn't include head SHA or reviewDecision)
+  full_pr=$(gh pr view "$pr_number" \
+    --repo "$repo" \
+    --json headRefOid,reviewDecision,isDraft \
+    2>/dev/null || echo '{}')
+
+  head_sha=$(echo "$full_pr" | jq -r '.headRefOid // ""')
+  review_decision=$(echo "$full_pr" | jq -r '.reviewDecision // ""')
+  is_draft=$(echo "$full_pr" | jq -r '.isDraft // false')
+
+  if [[ -z "$head_sha" ]]; then
+    log "Skipping PR #${pr_number} in ${repo}: could not fetch details"
+    continue
+  fi
+
+  log "Processing ${repo}#${pr_number}: ${pr_title} (sha: ${head_sha:0:8})"
+
+  # ── 1. Check CI status ──────────────────────────────────────────────────
+  checks_json=$(gh pr checks "$pr_number" \
+    --repo "$repo" \
+    --json name,state,conclusion,startedAt,completedAt \
+    2>/dev/null || echo "[]")
+
+  total_checks=$(echo "$checks_json" | jq 'length')
+  completed_checks=$(echo "$checks_json" | jq '[.[] | select(.state == "COMPLETED" or .conclusion != "")] | length')
+  failed_checks=$(echo "$checks_json" | jq '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | length')
+
+  prev_sha=$(get_state "${state_prefix}_sha")
+  prev_ci_state=$(get_state "${state_prefix}_ci_state")
+
+  # Determine current CI state
+  if (( total_checks == 0 )); then
+    ci_state="none"
+  elif (( failed_checks > 0 )); then
+    ci_state="failed"
+  elif (( completed_checks == total_checks )); then
+    ci_state="passed"
+  else
+    ci_state="pending"
+  fi
+
+  # Short repo name for notifications
+  short_repo=$(echo "$repo" | cut -d/ -f2)
+
+  # Notify on CI failure (immediately, even if not all checks done)
+  if [[ "$ci_state" == "failed" && "$prev_ci_state" != "failed" && "$head_sha" == "$prev_sha" ]]; then
+    failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
+    notify "CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url"
+  fi
+
+  # New push — reset CI tracking
+  if [[ "$head_sha" != "$prev_sha" ]]; then
+    log "New SHA detected for ${repo}#${pr_number}, resetting CI state"
+    set_state "${state_prefix}_sha" "$head_sha"
+    set_state "${state_prefix}_ci_state" "$ci_state"
+    if [[ "$ci_state" == "failed" ]]; then
+      failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
+      notify "CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url"
+    fi
+  else
+    # Same SHA — check for transitions
+    if [[ "$ci_state" == "passed" && "$prev_ci_state" != "passed" ]]; then
+      notify "CI Passed — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url"
+    fi
+    set_state "${state_prefix}_ci_state" "$ci_state"
+  fi
+
+  # ── 2. Check for new human reviews (changes_requested or commented) ─────
+  reviews_json=$(gh api "repos/${repo}/pulls/${pr_number}/reviews" \
+    --jq '[.[] | select(.user.type != "Bot") | {id: .id, user: .user.login, state: .state}]' \
+    2>/dev/null || echo "[]")
+
+  latest_review_id=$(echo "$reviews_json" | jq -r 'if length > 0 then .[-1].id else 0 end')
+  prev_review_id=$(get_state "${state_prefix}_last_review_id")
+  prev_review_id=${prev_review_id:-0}
+
+  if (( latest_review_id > prev_review_id )); then
+    new_reviews=$(echo "$reviews_json" | jq -c --argjson prev "$prev_review_id" '[.[] | select(.id > $prev)]')
+    echo "$new_reviews" | jq -c '.[]' 2>/dev/null | while IFS= read -r review; do
+      reviewer=$(echo "$review" | jq -r '.user')
+      review_state=$(echo "$review" | jq -r '.state')
+
+      if [[ "$review_state" == "APPROVED" ]]; then
+        continue
+      fi
+
+      if [[ "$reviewer" == "$GITHUB_USER" ]] || is_ignored_user "$reviewer"; then
+        continue
+      fi
+
+      case "$review_state" in
+        CHANGES_REQUESTED)
+          notify "Changes Requested — ${short_repo}#${pr_number}" "${reviewer} requested changes" "$pr_url"
+          ;;
+        COMMENTED)
+          notify "Review Comment — ${short_repo}#${pr_number}" "${reviewer} left a review" "$pr_url"
+          ;;
+      esac
+    done
+    set_state "${state_prefix}_last_review_id" "$latest_review_id"
+  fi
+
+  # ── 3. Check for new issue comments (non-bot, non-self) ─────────────────
+  comments_json=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
+    --jq '[.[] | select(.user.type != "Bot") | select(.user.login != "'"$GITHUB_USER"'") | {id: .id, user: .user.login, body: (.body | split("\n") | .[0] | .[0:120])}]' \
+    2>/dev/null || echo "[]")
+
+  latest_comment_id=$(echo "$comments_json" | jq -r 'if length > 0 then .[-1].id else 0 end')
+  prev_comment_id=$(get_state "${state_prefix}_last_comment_id")
+  prev_comment_id=${prev_comment_id:-0}
+
+  if (( latest_comment_id > prev_comment_id )); then
+    new_comments=$(echo "$comments_json" | jq -c --argjson prev "$prev_comment_id" '[.[] | select(.id > $prev)]')
+    echo "$new_comments" | jq -c '.[]' 2>/dev/null | while IFS= read -r comment; do
+      commenter=$(echo "$comment" | jq -r '.user')
+      if is_ignored_user "$commenter"; then
+        continue
+      fi
+      body=$(echo "$comment" | jq -r '.body')
+      notify "Comment — ${short_repo}#${pr_number}" "${commenter}: ${body}" "$pr_url"
+    done
+    set_state "${state_prefix}_last_comment_id" "$latest_comment_id"
+  fi
+
+  # ── 4. Ready to merge detection ─────────────────────────────────────────
+  prev_ready=$(get_state "${state_prefix}_ready_to_merge")
+  is_ready="false"
+
+  if [[ "$is_draft" == "false" && "$ci_state" == "passed" && "$review_decision" == "APPROVED" ]]; then
+    is_ready="true"
+  fi
+
+  if [[ "$is_ready" == "true" && "$prev_ready" != "true" ]]; then
+    notify "Ready to Merge! — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url"
+  fi
+  set_state "${state_prefix}_ready_to_merge" "$is_ready"
+
+done
+
+log "Poll cycle complete"
