@@ -114,10 +114,12 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   is_draft=$(echo "$pr" | jq -r '.is_draft')
   state_prefix="${repo}#${pr_number}"
 
-  # Get full PR details (search API doesn't include head SHA or reviewDecision)
+  # Get full PR details including CI status (search API doesn't include these).
+  # statusCheckRollup includes both CheckRun and StatusContext items, unlike
+  # `gh pr checks` which only returns CheckRun and silently drops commit statuses.
   full_pr=$(gh pr view "$pr_number" \
     --repo "$repo" \
-    --json headRefOid,reviewDecision,isDraft \
+    --json headRefOid,reviewDecision,isDraft,statusCheckRollup \
     2>/dev/null || echo '{}')
 
   head_sha=$(echo "$full_pr" | jq -r '.headRefOid // ""')
@@ -132,13 +134,26 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   log "Processing ${repo}#${pr_number}: ${pr_title} (sha: ${head_sha:0:8})"
 
   # ── 1. Check CI status ──────────────────────────────────────────────────
-  checks_json=$(gh pr checks "$pr_number" \
-    --repo "$repo" \
-    --json name,state,conclusion,startedAt,completedAt \
-    2>/dev/null || echo "[]")
+  # Normalize CheckRun and StatusContext into a unified format:
+  #   CheckRun:      { name, status: "COMPLETED", conclusion: "SUCCESS"|"FAILURE"|... }
+  #   StatusContext:  { context (as name), state: "SUCCESS"|"FAILURE"|"PENDING" }
+  checks_json=$(echo "$full_pr" | jq '[
+    (.statusCheckRollup // [])[] |
+    if .__typename == "CheckRun" then
+      { name: .name, status: .status, conclusion: .conclusion }
+    else
+      {
+        name: .context,
+        status: (if .state == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
+        conclusion: (if .state == "SUCCESS" then "SUCCESS"
+                     elif .state == "FAILURE" or .state == "ERROR" then "FAILURE"
+                     else "" end)
+      }
+    end
+  ]')
 
   total_checks=$(echo "$checks_json" | jq 'length')
-  completed_checks=$(echo "$checks_json" | jq '[.[] | select(.state == "COMPLETED" or .conclusion != "")] | length')
+  completed_checks=$(echo "$checks_json" | jq '[.[] | select(.status == "COMPLETED")] | length')
   failed_checks=$(echo "$checks_json" | jq '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | length')
 
   prev_sha=$(get_state "${state_prefix}_sha")
