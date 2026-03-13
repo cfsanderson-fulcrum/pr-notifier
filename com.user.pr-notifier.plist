@@ -6,8 +6,7 @@
   <string>com.user.pr-notifier</string>
   <key>ProgramArguments</key>
   <array>
-    <!-- Update this path to where you cloned the repo -->
-    <string>/Users/YOUR_USERNAME/pr-notifier/pr-notifier</string>
+    <string>/path/to/pr-notifier/pr-notifier</string>
   </array>
   <key>StartInterval</key>
   <integer>120</integer>
@@ -19,6 +18,10 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>GITHUB_USER</key>
+    <string>your-github-username</string>
+    <key>GITHUB_ORG</key>
+    <string>your-org</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
