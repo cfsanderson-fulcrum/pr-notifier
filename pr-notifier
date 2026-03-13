@@ -17,12 +17,12 @@ MAX_LOG_LINES="${PR_NOTIFIER_MAX_LOG_LINES:-500}"
 if [[ -n "${PR_NOTIFIER_WATCHED_LABELS+x}" ]]; then
   IFS=',' read -ra WATCHED_LABELS <<< "$PR_NOTIFIER_WATCHED_LABELS"
 else
-  WATCHED_LABELS=("design" "hold/design")
+  WATCHED_LABELS=()
 fi
 
 # Repo to watch for labeled/review-requested PRs.
 # To watch an entire org instead, clear this and set WATCHED_ORG.
-WATCHED_REPO="${PR_NOTIFIER_WATCHED_REPO:-fulcrumapp/fulcrum}"
+WATCHED_REPO="${PR_NOTIFIER_WATCHED_REPO:-}"
 WATCHED_ORG="${PR_NOTIFIER_WATCHED_ORG:-}"
 
 # Service accounts that are technically "User" type but are automation.

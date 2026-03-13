@@ -6,22 +6,22 @@
   <string>com.user.pr-notifier</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/caleb/Projects/pr-notifier/pr-notifier</string>
+    <string>/path/to/pr-notifier/pr-notifier</string>
   </array>
   <key>StartInterval</key>
   <integer>120</integer>
   <key>StandardOutPath</key>
-  <string>/Users/caleb/.local/share/pr-notifier/launchd-stdout.log</string>
+  <string>/Users/YOUR_USERNAME/.local/share/pr-notifier/launchd-stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/caleb/.local/share/pr-notifier/launchd-stderr.log</string>
+  <string>/Users/YOUR_USERNAME/.local/share/pr-notifier/launchd-stderr.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>GITHUB_USER</key>
-    <string>cfsanderson-fulcrum</string>
+    <string>your-github-username</string>
     <key>GITHUB_ORG</key>
-    <string>fulcrumapp</string>
+    <string>your-org</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -62,7 +62,8 @@ label and unions the results by PR number using `jq unique_by(.number)`.
 
 The `WATCHED_REPO` variable scopes queries to a single repo (e.g.,
 `repo:fulcrumapp/fulcrum`). If `WATCHED_REPO` is empty and `WATCHED_ORG` is
-set, it uses `org:{org}` instead for org-wide monitoring.
+set, it uses `org:{org}` instead for org-wide monitoring. Both variables
+default to empty — watched-PR features are disabled until explicitly configured.
 
 ### New/disappeared detection
 

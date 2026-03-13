@@ -114,15 +114,14 @@ cat ~/.local/share/pr-notifier/launchd-stderr.log
 
 ## Configuration
 
-All settings can be overridden via environment variables. Defaults are in the
-script and work out of the box for most Fulcrum team members.
+All settings can be overridden via environment variables.
 
 | Env variable | Script default | Purpose |
 |---|---|---|
 | `GITHUB_USER` | _(none — required)_ | Your GitHub username |
 | `GITHUB_ORG` | _(none — required)_ | The GitHub org to monitor for your authored PRs |
-| `PR_NOTIFIER_WATCHED_LABELS` | `design,hold/design` | Comma-separated labels to watch (OR logic). Set to empty to disable |
-| `PR_NOTIFIER_WATCHED_REPO` | `fulcrumapp/fulcrum` | Specific repo to watch for labels/reviews |
+| `PR_NOTIFIER_WATCHED_LABELS` | _(none — disabled)_ | Comma-separated labels to watch (OR logic). Must be set to enable label watching |
+| `PR_NOTIFIER_WATCHED_REPO` | _(none)_ | Specific repo to watch for labels/reviews. Must be set (or set `PR_NOTIFIER_WATCHED_ORG`) to enable watched PRs |
 | `PR_NOTIFIER_WATCHED_ORG` | _(empty)_ | Org to watch for labels/reviews (used if watched repo is empty) |
 | `PR_NOTIFIER_STATE_DIR` | `~/.local/share/pr-notifier` | Directory for state and log files |
 | `PR_NOTIFIER_MAX_LOG_LINES` | `500` | Log file rotation threshold |
