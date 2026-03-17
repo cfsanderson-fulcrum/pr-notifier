@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ─── CLI Flags ────────────────────────────────────────────────────────────────
+CHECK_MODE=false
+if [[ "${1:-}" == "--check" ]]; then
+  CHECK_MODE=true
+fi
+
 # ─── Configuration ────────────────────────────────────────────────────────────
+# Source a shared config file if it exists. Environment variables already set
+# (e.g. via launchd plist) take precedence — the file only fills in gaps.
+STATE_DIR="${PR_NOTIFIER_STATE_DIR:-${HOME}/.local/share/pr-notifier}"
+CONFIG_FILE="${STATE_DIR}/config"
+if [[ -f "$CONFIG_FILE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+  set +a
+fi
+
 # All settings can be overridden via environment variables.
 GITHUB_USER="${GITHUB_USER:-}"
 GITHUB_ORG="${GITHUB_ORG:-}"
-STATE_DIR="${PR_NOTIFIER_STATE_DIR:-${HOME}/.local/share/pr-notifier}"
 STATE_FILE="${STATE_DIR}/state.json"
 LOG_FILE="${STATE_DIR}/pr-notifier.log"
 MAX_LOG_LINES="${PR_NOTIFIER_MAX_LOG_LINES:-500}"
@@ -99,6 +115,92 @@ if ! command -v jq &>/dev/null; then
   log "ERROR: jq not found"
   exit 1
 fi
+
+# ─── Check Mode ───────────────────────────────────────────────────────────────
+# Usage: pr-notifier --check
+# Shows all currently matching watched PRs (labels + review-requested) and sends
+# a notification for each one. Does not update state, so normal polling is
+# unaffected.
+
+if [[ "$CHECK_MODE" == true ]]; then
+  watch_scope=""
+  if [[ -n "$WATCHED_REPO" ]]; then
+    watch_scope="repo:${WATCHED_REPO}"
+  elif [[ -n "$WATCHED_ORG" ]]; then
+    watch_scope="org:${WATCHED_ORG}"
+  fi
+
+  if [[ -z "$watch_scope" ]]; then
+    echo "Error: Set PR_NOTIFIER_WATCHED_REPO or PR_NOTIFIER_WATCHED_ORG." >&2
+    exit 1
+  fi
+
+  echo "🔍 Checking watched PRs for ${watch_scope}..."
+  found=0
+
+  # Labeled PRs (OR across labels)
+  labeled_prs="[]"
+  if (( ${#WATCHED_LABELS[@]} > 0 )); then
+    echo "   Labels: ${WATCHED_LABELS[*]}"
+    for label in "${WATCHED_LABELS[@]}"; do
+      result=$(gh api -X GET "search/issues" \
+        -f q="is:pr is:open ${watch_scope} label:\"${label}\"" \
+        -f per_page=50 \
+        --jq '[.items[] | {
+          number: .number,
+          title: .title,
+          url: .html_url,
+          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+        }]' \
+        2>/dev/null || echo "[]")
+      labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by(.number)')
+    done
+
+    label_count=$(echo "$labeled_prs" | jq 'length')
+    echo "   Found ${label_count} labeled PR(s)"
+    echo "$labeled_prs" | jq -c '.[]' | while IFS= read -r pr; do
+      num=$(echo "$pr" | jq -r '.number')
+      pr_title=$(echo "$pr" | jq -r '.title')
+      pr_url=$(echo "$pr" | jq -r '.url')
+      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
+      echo "   🏷️  ${short_repo}#${num}: ${pr_title}"
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+    done
+    found=$((found + label_count))
+  fi
+
+  # Review-requested PRs
+  if [[ -n "$GITHUB_USER" ]]; then
+    echo "   Review requested for: ${GITHUB_USER}"
+    review_prs=$(gh api -X GET "search/issues" \
+      -f q="is:pr is:open ${watch_scope} review-requested:${GITHUB_USER}" \
+      -f per_page=50 \
+      --jq '[.items[] | {
+        number: .number,
+        title: .title,
+        url: .html_url,
+        repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+      }]' \
+      2>/dev/null || echo "[]")
+
+    review_count=$(echo "$review_prs" | jq 'length')
+    echo "   Found ${review_count} review-requested PR(s)"
+    echo "$review_prs" | jq -c '.[]' | while IFS= read -r pr; do
+      num=$(echo "$pr" | jq -r '.number')
+      pr_title=$(echo "$pr" | jq -r '.title')
+      pr_url=$(echo "$pr" | jq -r '.url')
+      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
+      echo "   👀 ${short_repo}#${num}: ${pr_title}"
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+    done
+    found=$((found + review_count))
+  fi
+
+  echo "✅ Done. ${found} total PR(s) found."
+  exit 0
+fi
+
+# ─── Normal Poll Mode ────────────────────────────────────────────────────────
 
 log "Starting poll cycle for org: ${GITHUB_ORG}"
 

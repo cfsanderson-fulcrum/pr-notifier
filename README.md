@@ -70,13 +70,25 @@ It does **not** notify for:
 6. Install the launchd agent to run it automatically every 2 minutes:
 
    ```sh
-   # Copy the example plist and fill in your paths
-   cp com.user.pr-notifier.plist ~/Library/LaunchAgents/
+   # Either copy or symlink the plist into LaunchAgents
+   ln -s "$(pwd)/com.user.pr-notifier.plist" ~/Library/LaunchAgents/
    ```
 
-   Edit `~/Library/LaunchAgents/com.user.pr-notifier.plist` and replace
-   `YOUR_USERNAME` with your macOS username (or use absolute paths to
-   wherever you placed the repo).
+   Edit `com.user.pr-notifier.plist` and replace all placeholder values:
+   - `/path/to/pr-notifier/pr-notifier` → absolute path to the script
+   - `YOUR_USERNAME` → your macOS username
+   - `your-github-username` → your GitHub handle
+   - `your-org` → the GitHub org to monitor
+
+   To enable watched PRs, add these keys inside the `EnvironmentVariables`
+   dict:
+
+   ```xml
+   <key>PR_NOTIFIER_WATCHED_LABELS</key>
+   <string>design,hold/design</string>
+   <key>PR_NOTIFIER_WATCHED_REPO</key>
+   <string>your-org/your-repo</string>
+   ```
 
    ```sh
    # Load (start running every 2 minutes)
@@ -89,8 +101,11 @@ It does **not** notify for:
 ## Usage
 
 ```sh
-# Run manually (one poll cycle)
+# Run manually (one poll cycle — only notifies on changes since last run)
 ./pr-notifier
+
+# One-shot check: notify about ALL currently matching watched PRs
+./pr-notifier --check
 
 # View the log
 cat ~/.local/share/pr-notifier/pr-notifier.log
@@ -111,6 +126,14 @@ launchctl print gui/$(id -u)/com.user.pr-notifier
 cat ~/.local/share/pr-notifier/launchd-stdout.log
 cat ~/.local/share/pr-notifier/launchd-stderr.log
 ```
+
+### `--check` mode
+
+Running `./pr-notifier --check` finds all PRs that currently match your
+watched settings (labels and review-requested) and sends a notification for
+each one. Unlike the normal poll mode, it does **not** compare against
+previous state — you get notified about everything it finds. It also does
+**not** update state, so the next normal poll cycle is unaffected.
 
 ## Configuration
 
