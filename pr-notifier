@@ -51,9 +51,10 @@ notify() {
   local title="$1"
   local message="$2"
   local url="${3:-}"
+  local group="${4:-pr-notifier}"
 
   if [[ -n "$url" ]] && command -v terminal-notifier &>/dev/null; then
-    terminal-notifier -title "$title" -message "$message" -open "$url" -sound Glass -group "pr-notifier"
+    terminal-notifier -title "$title" -message "$message" -open "$url" -sound Glass -group "$group"
   else
     # Escape double-quotes for osascript
     local t="${title//\"/\\\"}"
@@ -164,7 +165,7 @@ if [[ "$CHECK_MODE" == true ]]; then
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
       echo "   🏷️  ${short_repo}#${num}: ${pr_title}"
-      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
     done
     found=$((found + label_count))
   fi
@@ -191,7 +192,7 @@ if [[ "$CHECK_MODE" == true ]]; then
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
       echo "   👀 ${short_repo}#${num}: ${pr_title}"
-      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
     done
     found=$((found + review_count))
   fi
@@ -292,7 +293,7 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   # Notify on CI failure (immediately, even if not all checks done)
   if [[ "$ci_state" == "failed" && "$prev_ci_state" != "failed" && "$head_sha" == "$prev_sha" ]]; then
     failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
-    notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url"
+    notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
   fi
 
   # New push — reset CI tracking
@@ -302,12 +303,12 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
     set_state "${state_prefix}_ci_state" "$ci_state"
     if [[ "$ci_state" == "failed" ]]; then
       failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
-      notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url"
+      notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
     fi
   else
     # Same SHA — check for transitions
     if [[ "$ci_state" == "passed" && "$prev_ci_state" != "passed" ]]; then
-      notify "✅ CI Passed — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url"
+      notify "✅ CI Passed — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
     fi
     set_state "${state_prefix}_ci_state" "$ci_state"
   fi
@@ -337,10 +338,10 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
 
       case "$review_state" in
         CHANGES_REQUESTED)
-          notify "🔃 Changes Requested — ${short_repo}#${pr_number}" "${reviewer} requested changes" "$pr_url"
+          notify "🔃 Changes Requested — ${short_repo}#${pr_number}" "${reviewer} requested changes" "$pr_url" "pr-${pr_number}"
           ;;
         COMMENTED)
-          notify "💬 Review Comment — ${short_repo}#${pr_number}" "${reviewer} left a review" "$pr_url"
+          notify "💬 Review Comment — ${short_repo}#${pr_number}" "${reviewer} left a review" "$pr_url" "pr-${pr_number}"
           ;;
       esac
     done
@@ -364,7 +365,7 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
         continue
       fi
       body=$(echo "$comment" | jq -r '.body')
-      notify "💬 Comment — ${short_repo}#${pr_number}" "${commenter}: ${body}" "$pr_url"
+      notify "💬 Comment — ${short_repo}#${pr_number}" "${commenter}: ${body}" "$pr_url" "pr-${pr_number}"
     done
     set_state "${state_prefix}_last_comment_id" "$latest_comment_id"
   fi
@@ -378,7 +379,7 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   fi
 
   if [[ "$is_ready" == "true" && "$prev_ready" != "true" ]]; then
-    notify "🚀 Ready to Merge! — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url"
+    notify "🚀 Ready to Merge! — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
   fi
   set_state "${state_prefix}_ready_to_merge" "$is_ready"
 
@@ -447,7 +448,7 @@ if [[ -n "$watch_scope" ]]; then
       pr_title=$(echo "$pr" | jq -r '.title')
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
-      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
     fi
   done
 
@@ -458,7 +459,7 @@ if [[ -n "$watch_scope" ]]; then
       pr_title=$(echo "$pr" | jq -r '.title')
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
-      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
     fi
   done
 
@@ -484,7 +485,7 @@ if [[ -n "$watch_scope" ]]; then
       if [[ "$pr_state" == "CLOSED" || "$pr_state" == "MERGED" ]]; then
         state_emoji="✅"
         [[ "$pr_state" == "MERGED" ]] && state_emoji="🎉"
-        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url"
+        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
       else
         log "PR ${repo}#${num} left watched set (label removed or review dismissed)"
       fi
