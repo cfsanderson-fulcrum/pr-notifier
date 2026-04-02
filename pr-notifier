@@ -36,9 +36,15 @@ else
   WATCHED_LABELS=()
 fi
 
-# Repo to watch for labeled/review-requested PRs.
-# To watch an entire org instead, clear this and set WATCHED_ORG.
-WATCHED_REPO="${PR_NOTIFIER_WATCHED_REPO:-}"
+# Repos to watch for labeled/review-requested PRs (comma-separated).
+# Falls back to legacy PR_NOTIFIER_WATCHED_REPO, then PR_NOTIFIER_WATCHED_ORG.
+if [[ -n "${PR_NOTIFIER_WATCHED_REPOS+x}" ]]; then
+  IFS=',' read -ra WATCHED_REPOS <<< "$PR_NOTIFIER_WATCHED_REPOS"
+elif [[ -n "${PR_NOTIFIER_WATCHED_REPO:-}" ]]; then
+  WATCHED_REPOS=("${PR_NOTIFIER_WATCHED_REPO}")
+else
+  WATCHED_REPOS=()
+fi
 WATCHED_ORG="${PR_NOTIFIER_WATCHED_ORG:-}"
 
 # Service accounts that are technically "User" type but are automation.
@@ -124,37 +130,41 @@ fi
 # unaffected.
 
 if [[ "$CHECK_MODE" == true ]]; then
-  watch_scope=""
-  if [[ -n "$WATCHED_REPO" ]]; then
-    watch_scope="repo:${WATCHED_REPO}"
+  watch_scopes=()
+  if (( ${#WATCHED_REPOS[@]} > 0 )); then
+    for r in "${WATCHED_REPOS[@]}"; do
+      watch_scopes+=("repo:${r}")
+    done
   elif [[ -n "$WATCHED_ORG" ]]; then
-    watch_scope="org:${WATCHED_ORG}"
+    watch_scopes=("org:${WATCHED_ORG}")
   fi
 
-  if [[ -z "$watch_scope" ]]; then
-    echo "Error: Set PR_NOTIFIER_WATCHED_REPO or PR_NOTIFIER_WATCHED_ORG." >&2
+  if (( ${#watch_scopes[@]} == 0 )); then
+    echo "Error: Set PR_NOTIFIER_WATCHED_REPOS or PR_NOTIFIER_WATCHED_ORG." >&2
     exit 1
   fi
 
-  echo "🔍 Checking watched PRs for ${watch_scope}..."
+  echo "🔍 Checking watched PRs for ${watch_scopes[*]}..."
   found=0
 
-  # Labeled PRs (OR across labels)
+  # Labeled PRs (OR across labels, union across repos)
   labeled_prs="[]"
   if (( ${#WATCHED_LABELS[@]} > 0 )); then
     echo "   Labels: ${WATCHED_LABELS[*]}"
-    for label in "${WATCHED_LABELS[@]}"; do
-      result=$(gh api -X GET "search/issues" \
-        -f q="is:pr is:open ${watch_scope} label:\"${label}\"" \
-        -f per_page=50 \
-        --jq '[.items[] | {
-          number: .number,
-          title: .title,
-          url: .html_url,
-          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
-        }]' \
-        2>/dev/null || echo "[]")
-      labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by(.number)')
+    for scope in "${watch_scopes[@]}"; do
+      for label in "${WATCHED_LABELS[@]}"; do
+        result=$(gh api -X GET "search/issues" \
+          -f q="is:pr is:open ${scope} label:\"${label}\"" \
+          -f per_page=50 \
+          --jq '[.items[] | {
+            number: .number,
+            title: .title,
+            url: .html_url,
+            repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+          }]' \
+          2>/dev/null || echo "[]")
+        labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+      done
     done
 
     label_count=$(echo "$labeled_prs" | jq 'length')
@@ -165,7 +175,7 @@ if [[ "$CHECK_MODE" == true ]]; then
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
       echo "   🏷️  ${short_repo}#${num}: ${pr_title}"
-      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
     done
     found=$((found + label_count))
   fi
@@ -173,16 +183,20 @@ if [[ "$CHECK_MODE" == true ]]; then
   # Review-requested PRs
   if [[ -n "$GITHUB_USER" ]]; then
     echo "   Review requested for: ${GITHUB_USER}"
-    review_prs=$(gh api -X GET "search/issues" \
-      -f q="is:pr is:open ${watch_scope} review-requested:${GITHUB_USER}" \
-      -f per_page=50 \
-      --jq '[.items[] | {
-        number: .number,
-        title: .title,
-        url: .html_url,
-        repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
-      }]' \
-      2>/dev/null || echo "[]")
+    review_prs="[]"
+    for scope in "${watch_scopes[@]}"; do
+      result=$(gh api -X GET "search/issues" \
+        -f q="is:pr is:open ${scope} review-requested:${GITHUB_USER}" \
+        -f per_page=50 \
+        --jq '[.items[] | {
+          number: .number,
+          title: .title,
+          url: .html_url,
+          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+        }]' \
+        2>/dev/null || echo "[]")
+      review_prs=$(echo "${review_prs}" "${result}" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+    done
 
     review_count=$(echo "$review_prs" | jq 'length')
     echo "   Found ${review_count} review-requested PR(s)"
@@ -192,7 +206,7 @@ if [[ "$CHECK_MODE" == true ]]; then
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
       echo "   👀 ${short_repo}#${num}: ${pr_title}"
-      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
     done
     found=$((found + review_count))
   fi
@@ -387,46 +401,53 @@ done
 
 # ─── 5. Watched PRs: label + review-requested monitoring ─────────────────────
 
-watch_scope=""
-if [[ -n "$WATCHED_REPO" ]]; then
-  watch_scope="repo:${WATCHED_REPO}"
+watch_scopes=()
+if (( ${#WATCHED_REPOS[@]} > 0 )); then
+  for r in "${WATCHED_REPOS[@]}"; do
+    watch_scopes+=("repo:${r}")
+  done
 elif [[ -n "$WATCHED_ORG" ]]; then
-  watch_scope="org:${WATCHED_ORG}"
+  watch_scopes=("org:${WATCHED_ORG}")
 fi
 
-if [[ -n "$watch_scope" ]]; then
+if (( ${#watch_scopes[@]} > 0 )); then
 
-  # ── 5a. Query for labeled PRs (OR across labels) ──────────────────────────
+  # ── 5a. Query for labeled PRs (OR across labels, union across repos) ────
   labeled_prs="[]"
   if (( ${#WATCHED_LABELS[@]} > 0 )); then
-    for label in "${WATCHED_LABELS[@]}"; do
-      result=$(gh api -X GET "search/issues" \
-        -f q="is:pr is:open ${watch_scope} label:\"${label}\"" \
-        -f per_page=50 \
-        --jq '[.items[] | {
-          number: .number,
-          title: .title,
-          url: .html_url,
-          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
-        }]' \
-        2>/dev/null || echo "[]")
-      # Union by PR number (deduplicate)
-      labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by(.number)')
+    for scope in "${watch_scopes[@]}"; do
+      for label in "${WATCHED_LABELS[@]}"; do
+        result=$(gh api -X GET "search/issues" \
+          -f q="is:pr is:open ${scope} label:\"${label}\"" \
+          -f per_page=50 \
+          --jq '[.items[] | {
+            number: .number,
+            title: .title,
+            url: .html_url,
+            repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+          }]' \
+          2>/dev/null || echo "[]")
+        labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+      done
     done
     log "Watched labels: found $(echo "$labeled_prs" | jq 'length') open PRs"
   fi
 
   # ── 5b. Query for review-requested PRs ────────────────────────────────────
-  review_prs=$(gh api -X GET "search/issues" \
-    -f q="is:pr is:open ${watch_scope} review-requested:${GITHUB_USER}" \
-    -f per_page=50 \
-    --jq '[.items[] | {
-      number: .number,
-      title: .title,
-      url: .html_url,
-      repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
-    }]' \
-    2>/dev/null || echo "[]")
+  review_prs="[]"
+  for scope in "${watch_scopes[@]}"; do
+    result=$(gh api -X GET "search/issues" \
+      -f q="is:pr is:open ${scope} review-requested:${GITHUB_USER}" \
+      -f per_page=50 \
+      --jq '[.items[] | {
+        number: .number,
+        title: .title,
+        url: .html_url,
+        repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
+      }]' \
+      2>/dev/null || echo "[]")
+    review_prs=$(echo "${review_prs}" "${result}" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+  done
   log "Watched review-requested: found $(echo "$review_prs" | jq 'length') open PRs"
 
   # ── 5c. Compare with previous state and notify ────────────────────────────
@@ -436,30 +457,32 @@ if [[ -n "$watch_scope" ]]; then
   prev_review=$(get_state "watched_review_prs")
   prev_review=${prev_review:-"[]"}
 
-  prev_labeled_nums=$(echo "$prev_labeled" | jq '[.[].number]')
-  prev_review_nums=$(echo "$prev_review" | jq '[.[].number]')
-  curr_labeled_nums=$(echo "$labeled_prs" | jq '[.[].number]')
-  curr_review_nums=$(echo "$review_prs" | jq '[.[].number]')
+  prev_labeled_keys=$(echo "$prev_labeled" | jq '[.[] | "\(.repo)#\(.number)"]')
+  prev_review_keys=$(echo "$prev_review" | jq '[.[] | "\(.repo)#\(.number)"]')
 
   # New labeled PRs
   echo "$labeled_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
-    if ! echo "$prev_labeled_nums" | jq -e "index(${num})" &>/dev/null; then
+    repo=$(echo "$pr" | jq -r '.repo')
+    key="${repo}#${num}"
+    if ! echo "$prev_labeled_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
       pr_title=$(echo "$pr" | jq -r '.title')
       pr_url=$(echo "$pr" | jq -r '.url')
-      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
-      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
+      short_repo=$(echo "$repo" | cut -d/ -f2)
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
     fi
   done
 
   # New review-requested PRs
   echo "$review_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
-    if ! echo "$prev_review_nums" | jq -e "index(${num})" &>/dev/null; then
+    repo=$(echo "$pr" | jq -r '.repo')
+    key="${repo}#${num}"
+    if ! echo "$prev_review_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
       pr_title=$(echo "$pr" | jq -r '.title')
       pr_url=$(echo "$pr" | jq -r '.url')
-      short_repo=$(echo "$pr" | jq -r '.repo' | cut -d/ -f2)
-      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
+      short_repo=$(echo "$repo" | cut -d/ -f2)
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
     fi
   done
 
@@ -467,14 +490,15 @@ if [[ -n "$watch_scope" ]]; then
   # Union previous labeled + review sets, compare with current union.
   # PRs that disappeared might be closed/merged.
 
-  prev_all=$(echo "$prev_labeled" "$prev_review" | jq -s 'add | unique_by(.number)')
-  curr_all=$(echo "$labeled_prs" "$review_prs" | jq -s 'add | unique_by(.number)')
-  curr_all_nums=$(echo "$curr_all" | jq '[.[].number]')
+  prev_all=$(echo "$prev_labeled" "$prev_review" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+  curr_all=$(echo "$labeled_prs" "$review_prs" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+  curr_all_keys=$(echo "$curr_all" | jq '[.[] | "\(.repo)#\(.number)"]')
 
   echo "$prev_all" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
-    if ! echo "$curr_all_nums" | jq -e "index(${num})" &>/dev/null; then
-      repo=$(echo "$pr" | jq -r '.repo')
+    repo=$(echo "$pr" | jq -r '.repo')
+    key="${repo}#${num}"
+    if ! echo "$curr_all_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
       pr_title=$(echo "$pr" | jq -r '.title')
       pr_url=$(echo "$pr" | jq -r '.url')
       short_repo=$(echo "$repo" | cut -d/ -f2)
@@ -485,7 +509,7 @@ if [[ -n "$watch_scope" ]]; then
       if [[ "$pr_state" == "CLOSED" || "$pr_state" == "MERGED" ]]; then
         state_emoji="✅"
         [[ "$pr_state" == "MERGED" ]] && state_emoji="🎉"
-        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${num}"
+        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
       else
         log "PR ${repo}#${num} left watched set (label removed or review dismissed)"
       fi

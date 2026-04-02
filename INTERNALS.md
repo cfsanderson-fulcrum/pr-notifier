@@ -60,10 +60,13 @@ label and unions the results by PR number using `jq unique_by(.number)`.
 
 ### Scoping
 
-The `WATCHED_REPO` variable scopes queries to a single repo (e.g.,
-`repo:fulcrumapp/fulcrum`). If `WATCHED_REPO` is empty and `WATCHED_ORG` is
-set, it uses `org:{org}` instead for org-wide monitoring. Both variables
-default to empty — watched-PR features are disabled until explicitly configured.
+`WATCHED_REPOS` (comma-separated) scopes queries to specific repos (e.g.,
+`fulcrumapp/fulcrum,fulcrumapp/fulcrum-ios`). Each repo gets its own set of
+search queries, and results are unioned with deduplication by `repo#number`.
+The legacy `WATCHED_REPO` (singular) is still supported as a single-repo
+fallback. If neither is set but `WATCHED_ORG` is, it uses `org:{org}` for
+org-wide monitoring. All variables default to empty — watched-PR features are
+disabled until explicitly configured.
 
 ### New/disappeared detection
 
@@ -81,11 +84,12 @@ under `watched_labeled_prs` and `watched_review_prs`. Each poll cycle:
 
 | Call | Count | Purpose |
 |---|---|---|
-| `search/issues` (labels) | L (one per label) | Find labeled PRs |
-| `search/issues` (reviews) | 1 | Find review-requested PRs |
+| `search/issues` (labels) | R × L (per repo, per label) | Find labeled PRs |
+| `search/issues` (reviews) | R (one per repo) | Find review-requested PRs |
 | `gh pr view` (closures) | D (one per disappeared PR) | Check if closed/merged |
 
-With 2 watched labels and no disappearances, that's 3 extra calls per cycle.
+With 3 watched repos, 2 labels, and no disappearances, that's 9 extra calls
+per cycle.
 
 ## State tracking
 
@@ -161,14 +165,14 @@ For N open PRs, each cycle makes:
 | `gh pr checks` | N | Get CI check statuses |
 | `repos/.../reviews` | N | Get review submissions |
 | `repos/.../comments` | N | Get issue comments |
-| `search/issues` (labels) | L | Find watched-label PRs (one per label) |
-| `search/issues` (reviews) | 1 | Find review-requested PRs |
+| `search/issues` (labels) | R×L | Find watched-label PRs (per repo, per label) |
+| `search/issues` (reviews) | R | Find review-requested PRs (per repo) |
 | `gh pr view` (closures) | D | Check disappeared PRs (typically 0) |
 
-**Total: 4N + L + D + 2 API calls per cycle.** With 9 open PRs, 2 watched
-labels, and no disappearances, that's 40 calls every 2 minutes. GitHub's
-authenticated rate limit is 5,000/hour, so this uses about 1,200/hour — well
-within limits.
+**Total: 4N + R×L + R + D + 1 API calls per cycle.** With 9 open PRs,
+3 watched repos, 2 labels, and no disappearances, that's 46 calls every
+2 minutes. GitHub's authenticated rate limit is 5,000/hour, so this uses
+about 1,380/hour — well within limits.
 
 ## Logging
 

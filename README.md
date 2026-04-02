@@ -86,8 +86,8 @@ It does **not** notify for:
    ```xml
    <key>PR_NOTIFIER_WATCHED_LABELS</key>
    <string>design,hold/design</string>
-   <key>PR_NOTIFIER_WATCHED_REPO</key>
-   <string>your-org/your-repo</string>
+   <key>PR_NOTIFIER_WATCHED_REPOS</key>
+   <string>your-org/repo1,your-org/repo2</string>
    ```
 
    ```sh
@@ -144,8 +144,9 @@ All settings can be overridden via environment variables.
 | `GITHUB_USER` | _(none — required)_ | Your GitHub username |
 | `GITHUB_ORG` | _(none — required)_ | The GitHub org to monitor for your authored PRs |
 | `PR_NOTIFIER_WATCHED_LABELS` | _(none — disabled)_ | Comma-separated labels to watch (OR logic). Must be set to enable label watching |
-| `PR_NOTIFIER_WATCHED_REPO` | _(none)_ | Specific repo to watch for labels/reviews. Must be set (or set `PR_NOTIFIER_WATCHED_ORG`) to enable watched PRs |
-| `PR_NOTIFIER_WATCHED_ORG` | _(empty)_ | Org to watch for labels/reviews (used if watched repo is empty) |
+| `PR_NOTIFIER_WATCHED_REPOS` | _(none)_ | Comma-separated repos to watch for labels/reviews (e.g., `org/repo1,org/repo2`). Falls back to `PR_NOTIFIER_WATCHED_REPO` for single-repo compat |
+| `PR_NOTIFIER_WATCHED_REPO` | _(none)_ | Legacy single-repo form (used if `WATCHED_REPOS` is not set) |
+| `PR_NOTIFIER_WATCHED_ORG` | _(empty)_ | Org to watch for labels/reviews (used if no repos are set) |
 | `PR_NOTIFIER_STATE_DIR` | `~/.local/share/pr-notifier` | Directory for state and log files |
 | `PR_NOTIFIER_MAX_LOG_LINES` | `500` | Log file rotation threshold |
 
