@@ -47,6 +47,14 @@ else
 fi
 WATCHED_ORG="${PR_NOTIFIER_WATCHED_ORG:-}"
 
+# Repos where only review-requested notifications fire — label watching is skipped.
+# Override via PR_NOTIFIER_REVIEW_ONLY_REPOS (comma-separated org/repo values).
+if [[ -n "${PR_NOTIFIER_REVIEW_ONLY_REPOS+x}" ]]; then
+  IFS=',' read -ra REVIEW_ONLY_REPOS <<< "$PR_NOTIFIER_REVIEW_ONLY_REPOS"
+else
+  REVIEW_ONLY_REPOS=()
+fi
+
 # Service accounts that are technically "User" type but are automation.
 # Add any other non-human accounts here.
 IGNORED_USERS=("dependabot[bot]" "github-actions[bot]" "renovate[bot]")
@@ -60,7 +68,7 @@ notify() {
   local group="${4:-pr-notifier}"
 
   if [[ -n "$url" ]] && command -v terminal-notifier &>/dev/null; then
-    terminal-notifier -title "$title" -message "$message" -open "$url" -sound Glass -group "$group"
+    terminal-notifier -title "$title" -message "$message" -open "$url" -sound Glass -group "$group" </dev/null
   else
     # Escape double-quotes for osascript
     local t="${title//\"/\\\"}"
@@ -77,6 +85,14 @@ log() {
   if [[ -f "$LOG_FILE" ]] && (( $(wc -l < "$LOG_FILE") > MAX_LOG_LINES )); then
     tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
   fi
+}
+
+is_review_only_repo() {
+  local repo="$1"
+  for r in "${REVIEW_ONLY_REPOS[@]+"${REVIEW_ONLY_REPOS[@]}"}"; do
+    [[ "$repo" == "$r" ]] && return 0
+  done
+  return 1
 }
 
 is_ignored_user() {
@@ -147,11 +163,19 @@ if [[ "$CHECK_MODE" == true ]]; then
   echo "🔍 Checking watched PRs for ${watch_scopes[*]}..."
   found=0
 
-  # Labeled PRs (OR across labels, union across repos)
+  # Labeled PRs (OR across labels, union across repos — skips review-only repos)
+  label_scopes=()
+  for scope in "${watch_scopes[@]}"; do
+    if [[ "$scope" == repo:* ]] && is_review_only_repo "${scope#repo:}"; then
+      continue
+    fi
+    label_scopes+=("$scope")
+  done
+
   labeled_prs="[]"
   if (( ${#WATCHED_LABELS[@]} > 0 )); then
     echo "   Labels: ${WATCHED_LABELS[*]}"
-    for scope in "${watch_scopes[@]}"; do
+    for scope in "${label_scopes[@]+"${label_scopes[@]}"}"; do
       for label in "${WATCHED_LABELS[@]}"; do
         result=$(gh api -X GET "search/issues" \
           -f q="is:pr is:open ${scope} label:\"${label}\"" \
@@ -413,9 +437,18 @@ fi
 if (( ${#watch_scopes[@]} > 0 )); then
 
   # ── 5a. Query for labeled PRs (OR across labels, union across repos) ────
+  # Repos in REVIEW_ONLY_REPOS are excluded from label queries.
+  label_scopes=()
+  for scope in "${watch_scopes[@]}"; do
+    if [[ "$scope" == repo:* ]] && is_review_only_repo "${scope#repo:}"; then
+      continue
+    fi
+    label_scopes+=("$scope")
+  done
+
   labeled_prs="[]"
   if (( ${#WATCHED_LABELS[@]} > 0 )); then
-    for scope in "${watch_scopes[@]}"; do
+    for scope in "${label_scopes[@]+"${label_scopes[@]}"}"; do
       for label in "${WATCHED_LABELS[@]}"; do
         result=$(gh api -X GET "search/issues" \
           -f q="is:pr is:open ${scope} label:\"${label}\"" \
@@ -457,33 +490,26 @@ if (( ${#watch_scopes[@]} > 0 )); then
   prev_review=$(get_state "watched_review_prs")
   prev_review=${prev_review:-"[]"}
 
-  prev_labeled_keys=$(echo "$prev_labeled" | jq '[.[] | "\(.repo)#\(.number)"]')
-  prev_review_keys=$(echo "$prev_review" | jq '[.[] | "\(.repo)#\(.number)"]')
-
-  # New labeled PRs
+  # All currently matching labeled PRs — always notify so they remain visible.
+  # terminal-notifier -group replaces existing notifications rather than stacking,
+  # so repeat fires update in place rather than creating duplicates.
   echo "$labeled_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
     repo=$(echo "$pr" | jq -r '.repo')
-    key="${repo}#${num}"
-    if ! echo "$prev_labeled_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
-      pr_title=$(echo "$pr" | jq -r '.title')
-      pr_url=$(echo "$pr" | jq -r '.url')
-      short_repo=$(echo "$repo" | cut -d/ -f2)
-      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
-    fi
+    pr_title=$(echo "$pr" | jq -r '.title')
+    pr_url=$(echo "$pr" | jq -r '.url')
+    short_repo=$(echo "$repo" | cut -d/ -f2)
+    notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
   done
 
-  # New review-requested PRs
+  # All currently review-requested PRs — always notify (same dedup logic).
   echo "$review_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
     repo=$(echo "$pr" | jq -r '.repo')
-    key="${repo}#${num}"
-    if ! echo "$prev_review_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
-      pr_title=$(echo "$pr" | jq -r '.title')
-      pr_url=$(echo "$pr" | jq -r '.url')
-      short_repo=$(echo "$repo" | cut -d/ -f2)
-      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
-    fi
+    pr_title=$(echo "$pr" | jq -r '.title')
+    pr_url=$(echo "$pr" | jq -r '.url')
+    short_repo=$(echo "$repo" | cut -d/ -f2)
+    notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
   done
 
   # ── 5d. Closure/merge detection ───────────────────────────────────────────
