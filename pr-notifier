@@ -2,10 +2,17 @@
 set -euo pipefail
 
 # ─── CLI Flags ────────────────────────────────────────────────────────────────
+# --check : one-shot report of all matching watched PRs; no state update
+# --auto  : launchd/scheduled mode — only notify for new additions since last run
+# (no flag): manual run — notify for all currently matching watched PRs
 CHECK_MODE=false
-if [[ "${1:-}" == "--check" ]]; then
-  CHECK_MODE=true
-fi
+AUTO_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --check) CHECK_MODE=true ;;
+    --auto)  AUTO_MODE=true ;;
+  esac
+done
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Source a shared config file if it exists. Environment variables already set
@@ -490,22 +497,33 @@ if (( ${#watch_scopes[@]} > 0 )); then
   prev_review=$(get_state "watched_review_prs")
   prev_review=${prev_review:-"[]"}
 
-  # All currently matching labeled PRs — always notify so they remain visible.
-  # terminal-notifier -group replaces existing notifications rather than stacking,
-  # so repeat fires update in place rather than creating duplicates.
+  prev_labeled_keys=$(echo "$prev_labeled" | jq '[.[] | "\(.repo)#\(.number)"]')
+  prev_review_keys=$(echo "$prev_review" | jq '[.[] | "\(.repo)#\(.number)"]')
+
+  # Labeled PRs:
+  #   --auto  → only notify for PRs not seen in previous auto run (avoids spam)
+  #   manual  → always notify so all current matches are visible on demand
   echo "$labeled_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
     repo=$(echo "$pr" | jq -r '.repo')
+    key="${repo}#${num}"
+    if [[ "$AUTO_MODE" == true ]] && echo "$prev_labeled_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
+      continue
+    fi
     pr_title=$(echo "$pr" | jq -r '.title')
     pr_url=$(echo "$pr" | jq -r '.url')
     short_repo=$(echo "$repo" | cut -d/ -f2)
     notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
   done
 
-  # All currently review-requested PRs — always notify (same dedup logic).
+  # Review-requested PRs: same manual vs auto logic.
   echo "$review_prs" | jq -c '.[]' | while IFS= read -r pr; do
     num=$(echo "$pr" | jq -r '.number')
     repo=$(echo "$pr" | jq -r '.repo')
+    key="${repo}#${num}"
+    if [[ "$AUTO_MODE" == true ]] && echo "$prev_review_keys" | jq -e "index(\"${key}\")" &>/dev/null; then
+      continue
+    fi
     pr_title=$(echo "$pr" | jq -r '.title')
     pr_url=$(echo "$pr" | jq -r '.url')
     short_repo=$(echo "$repo" | cut -d/ -f2)
