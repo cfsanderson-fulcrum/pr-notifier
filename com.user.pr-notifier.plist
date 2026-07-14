@@ -7,6 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/caleb/Projects/pr-notifier/pr-notifier</string>
+    <string>--auto</string>
   </array>
   <key>StartInterval</key>
   <integer>120</integer>
