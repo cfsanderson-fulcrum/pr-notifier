@@ -29,6 +29,9 @@ launchd (every 120s)
             │    ├─ gh pr view --json state  ←── check if closed/merged
             │    └─ notify if closed/merged, else silently drop
             └─ update state.json
+       │
+       └─ write snapshot.json  ←── combined authored + watched PR data,
+                                    for external consumption (e.g. Cowork)
 ```
 
 ## PR discovery
@@ -173,6 +176,70 @@ For N open PRs, each cycle makes:
 3 watched repos, 2 labels, and no disappearances, that's 46 calls every
 2 minutes. GitHub's authenticated rate limit is 5,000/hour, so this uses
 about 1,380/hour — well within limits.
+
+## Snapshot output (`--json`)
+
+Every run (manual, `--auto`, or `--json`) writes a combined snapshot to
+`snapshot.json` (path configurable via `PR_NOTIFIER_SNAPSHOT_FILE`), so a
+separate tool can see the same PR data pr-notifier tracks without querying
+GitHub itself. This exists to feed Claude Desktop/Cowork, whose GitHub MCP
+connectors can't replicate this script's derived logic (ready-to-merge,
+multi-repo watched-label union, review-request tracking) and where custom
+connector registration isn't available — dragging the file into a chat is
+the workaround.
+
+```json
+{
+  "last_synced_at": "2024-01-01T00:00:00Z",
+  "authored_prs": [
+    {"repo": "org/repo", "number": 123, "title": "...", "url": "...",
+     "is_draft": false, "ci_state": "passed", "review_decision": "APPROVED",
+     "ready_to_merge": true, "last_review_id": 456, "last_comment_id": 789}
+  ],
+  "watched_labeled_prs": [{"number": 1, "title": "...", "url": "...", "repo": "org/repo",
+                           "matched_labels": ["hold/design"]}],
+  "watched_review_prs": [{"number": 2, "title": "...", "url": "...", "repo": "org/repo"}]
+}
+```
+
+`matched_labels` on each `watched_labeled_prs` entry is the specific
+watched label(s) (from `PR_NOTIFIER_WATCHED_LABELS`) that matched that PR —
+e.g. `["hold/design"]`, or `["design", "hold/design"]` if a PR carries both.
+Since the label queries run once per label and are OR-unioned, a PR
+matching multiple labels shows up tagged from each query; these are merged
+by `repo#number` into one entry with a deduped `matched_labels` array
+before the snapshot is written.
+
+`last_synced_at` tells a consumer how fresh the snapshot is — it's stamped
+fresh on every write, so a stale file (poll cycle stopped, laptop asleep)
+is easy to detect by comparing it against the current time.
+
+`--json` is a read-only superset of `--check`: it shares the same gating
+(`READ_ONLY`) that skips every `notify()` and `set_state()` call, but —
+unlike `--check`, which only covers watched PRs — it also runs authored-PR
+discovery, so the snapshot has the full picture. It prints the snapshot to
+stdout in addition to writing the file, for on-demand refresh/piping.
+
+### Second copy for Cowork
+
+Since Claude Desktop/Cowork can only read files inside a connected project
+folder (not arbitrary paths like `~/.local/share`), `write_snapshot()`
+optionally writes an identical second copy to `PR_NOTIFIER_COWORK_SNAPSHOT_FILE`
+if that env var is set — both copies come from the same in-memory JSON
+string and the same timestamp, so they're always byte-identical, and both
+writes are atomic (temp file + `mv`). The variable is unset by default (no
+hardcoded personal path in the script itself); on this machine it's set in
+`~/.local/share/pr-notifier/config` to a path inside a connected Cowork
+project folder.
+
+The authored-PR loop builds its share of the snapshot data inside a piped
+`while read` loop, which runs in a subshell — any bash variable set there
+is lost once the loop ends. To escape that boundary, each iteration appends
+one JSON object to a temp NDJSON file; once the loop exits, the file is
+slurped with `jq -s` into a proper array. This mirrors how `set_state()`
+already escapes the same boundary via real file I/O rather than an
+in-memory variable. The watched-PR arrays don't need this trick — they're
+built by plain `for` loops outside any subshell.
 
 ## Logging
 

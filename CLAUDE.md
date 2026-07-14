@@ -15,6 +15,12 @@ A single-file macOS bash script (`pr-notifier`) that polls GitHub every 2 minute
 # One-shot check for all currently watched PRs (no state update)
 ./pr-notifier --check
 
+# One-shot JSON snapshot of authored + watched PRs (read-only, stdout + file)
+./pr-notifier --json | jq .
+
+# Inspect the last-written snapshot
+jq . ~/.local/share/pr-notifier/snapshot.json
+
 # Tail live log
 tail -f ~/.local/share/pr-notifier/pr-notifier.log
 
@@ -36,13 +42,14 @@ There is no test suite. Manual testing means running `./pr-notifier` and checkin
 
 ## Architecture
 
-The script runs in five sequential phases per poll cycle:
+The script runs in six sequential phases per poll cycle:
 
 1. **PR discovery** — single `gh api -X GET search/issues` call finds all open PRs you authored across the entire org
 2. **Per-PR checks** — for each PR: CI status (via `statusCheckRollup`), reviews, issue comments
 3. **Ready-to-merge detection** — `!draft && ci=passed && reviewDecision=APPROVED`
 4. **Watched label PRs** — one search query per label per repo, OR-unioned with `jq unique_by`
 5. **Watched review-requested PRs** — one search query per repo for `review-requested:{user}`
+6. **Snapshot write** — combined authored + watched PR data written to `snapshot.json` (every run), for external consumption (e.g. dragging into a Claude Desktop/Cowork chat since custom MCP connectors aren't available there)
 
 State is persisted as a flat JSON key-value map at `~/.local/share/pr-notifier/state.json`. Keys use `{owner/repo}#{number}_{field}` for authored PR state, and `watched_labeled_prs` / `watched_review_prs` (JSON arrays) for watched PR sets.
 
@@ -53,10 +60,12 @@ State is persisted as a flat JSON key-value map at `~/.local/share/pr-notifier/s
 - **launchd env vars** — shell profile (`~/.zshrc`) vars are not available to launchd agents. Use the `EnvironmentVariables` dict in the plist, or a `~/.local/share/pr-notifier/config` file (sourced with `set -a`).
 - **terminal-notifier `-group`** — the group ID is per-PR (`pr-{repo}-{number}`) so notifications replace previous ones for the same PR rather than stacking.
 - **`${VAR+x}` vs `${VAR:-}`** — the script uses `+x` to distinguish "not set" from "set to empty string" for `WATCHED_LABELS`.
+- **Piped `while read` loops run in a subshell** — this affects the authored-PR loop and all three watched-PR loops. Any accumulation needed across iterations (e.g. building the `--json` snapshot) must go through real file I/O (NDJSON append + `jq -s` slurp afterward), not bash variables set inside the loop body — the same reason `set_state()` does a full read/write per call instead of mutating an in-memory value.
+- **`--json` is a read-only superset of `--check`** — it shares the same `READ_ONLY` gating as `--check` (skips all `notify()` and `set_state()` calls) but also runs authored-PR discovery, so it captures the full picture in one file. `snapshot.json` is written as a side effect of every run (manual, `--auto`, `--json`) — `--check` alone is the one exception and does not produce a snapshot.
 
 ## Configuration
 
-All config via environment variables. Required: `GITHUB_USER`, `GITHUB_ORG`. Optional: `PR_NOTIFIER_WATCHED_LABELS` (comma-separated), `PR_NOTIFIER_WATCHED_REPOS` (comma-separated `org/repo`), `PR_NOTIFIER_WATCHED_ORG`, `PR_NOTIFIER_STATE_DIR`, `PR_NOTIFIER_MAX_LOG_LINES`.
+All config via environment variables. Required: `GITHUB_USER`, `GITHUB_ORG`. Optional: `PR_NOTIFIER_WATCHED_LABELS` (comma-separated), `PR_NOTIFIER_WATCHED_REPOS` (comma-separated `org/repo`), `PR_NOTIFIER_WATCHED_ORG`, `PR_NOTIFIER_STATE_DIR`, `PR_NOTIFIER_MAX_LOG_LINES`, `PR_NOTIFIER_SNAPSHOT_FILE` (default `${STATE_DIR}/snapshot.json`), `PR_NOTIFIER_COWORK_SNAPSHOT_FILE` (optional second copy of the snapshot for tools that can't reach `STATE_DIR`; unset = disabled).
 
 ## Conventions
 

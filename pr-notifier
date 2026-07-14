@@ -4,15 +4,25 @@ set -euo pipefail
 # ─── CLI Flags ────────────────────────────────────────────────────────────────
 # --check : one-shot report of all matching watched PRs; no state update
 # --auto  : launchd/scheduled mode — only notify for new additions since last run
+# --json  : one-shot JSON snapshot of authored + watched PRs to stdout; read-only
+#           superset of --check (also covers authored PRs); no state update
 # (no flag): manual run — notify for all currently matching watched PRs
 CHECK_MODE=false
 AUTO_MODE=false
+JSON_MODE=false
 for arg in "$@"; do
   case "$arg" in
     --check) CHECK_MODE=true ;;
     --auto)  AUTO_MODE=true ;;
+    --json)  JSON_MODE=true ;;
   esac
 done
+
+# Read-only mode: skip notifications and state mutations (still runs full discovery).
+READ_ONLY=false
+if [[ "$CHECK_MODE" == true || "$JSON_MODE" == true ]]; then
+  READ_ONLY=true
+fi
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Source a shared config file if it exists. Environment variables already set
@@ -31,6 +41,10 @@ GITHUB_USER="${GITHUB_USER:-}"
 GITHUB_ORG="${GITHUB_ORG:-}"
 STATE_FILE="${STATE_DIR}/state.json"
 LOG_FILE="${STATE_DIR}/pr-notifier.log"
+SNAPSHOT_FILE="${PR_NOTIFIER_SNAPSHOT_FILE:-${STATE_DIR}/snapshot.json}"
+# Optional second copy for tools that can't reach ${STATE_DIR} (e.g. a Claude
+# Desktop/Cowork connected project folder). Unset = feature disabled.
+COWORK_SNAPSHOT_FILE="${PR_NOTIFIER_COWORK_SNAPSHOT_FILE:-}"
 MAX_LOG_LINES="${PR_NOTIFIER_MAX_LOG_LINES:-500}"
 
 # ─── Watched PRs ──────────────────────────────────────────────────────────────
@@ -130,6 +144,24 @@ set_state() {
   local tmp
   tmp=$(jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$STATE_FILE")
   echo "$tmp" > "$STATE_FILE"
+}
+
+write_snapshot() {
+  local authored="$1"
+  local labeled="$2"
+  local review="$3"
+  local snapshot
+  snapshot=$(jq -n --argjson authored "$authored" --argjson labeled "$labeled" --argjson review "$review" \
+    --arg last_synced_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{last_synced_at: $last_synced_at, authored_prs: $authored,
+      watched_labeled_prs: $labeled, watched_review_prs: $review}')
+
+  echo "$snapshot" > "${SNAPSHOT_FILE}.tmp" && mv "${SNAPSHOT_FILE}.tmp" "$SNAPSHOT_FILE"
+
+  if [[ -n "$COWORK_SNAPSHOT_FILE" ]]; then
+    mkdir -p "$(dirname "$COWORK_SNAPSHOT_FILE")"
+    echo "$snapshot" > "${COWORK_SNAPSHOT_FILE}.tmp" && mv "${COWORK_SNAPSHOT_FILE}.tmp" "$COWORK_SNAPSHOT_FILE"
+  fi
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -268,6 +300,12 @@ search_json=$(gh api -X GET "search/issues" \
 pr_count=$(echo "$search_json" | jq 'length')
 log "Found ${pr_count} open PRs across ${GITHUB_ORG}"
 
+# Piped while-read loops run in a subshell, so per-PR fields computed inside
+# don't survive past `done`. Accumulate a snapshot line per PR to a temp file
+# (same trick set_state already relies on: real file I/O escapes the subshell)
+# and slurp it into a JSON array once the loop exits.
+authored_snapshot_tmp=$(mktemp "${STATE_DIR}/.authored_snapshot.XXXXXX")
+
 echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   repo=$(echo "$pr" | jq -r '.repo')
   pr_number=$(echo "$pr" | jq -r '.number')
@@ -338,24 +376,34 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   # Notify on CI failure (immediately, even if not all checks done)
   if [[ "$ci_state" == "failed" && "$prev_ci_state" != "failed" && "$head_sha" == "$prev_sha" ]]; then
     failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
-    notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
+    if [[ "$READ_ONLY" != true ]]; then
+      notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
+    fi
   fi
 
   # New push — reset CI tracking
   if [[ "$head_sha" != "$prev_sha" ]]; then
     log "New SHA detected for ${repo}#${pr_number}, resetting CI state"
-    set_state "${state_prefix}_sha" "$head_sha"
-    set_state "${state_prefix}_ci_state" "$ci_state"
+    if [[ "$READ_ONLY" != true ]]; then
+      set_state "${state_prefix}_sha" "$head_sha"
+      set_state "${state_prefix}_ci_state" "$ci_state"
+    fi
     if [[ "$ci_state" == "failed" ]]; then
       failed_names=$(echo "$checks_json" | jq -r '[.[] | select(.conclusion == "FAILURE" or .conclusion == "STARTUP_FAILURE" or .conclusion == "TIMED_OUT")] | .[0:3] | .[].name' | tr '\n' ', ' | sed 's/,$//')
-      notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
+      if [[ "$READ_ONLY" != true ]]; then
+        notify "❌ CI Failed — ${short_repo}#${pr_number}" "${failed_names}" "$pr_url" "pr-${pr_number}"
+      fi
     fi
   else
     # Same SHA — check for transitions
     if [[ "$ci_state" == "passed" && "$prev_ci_state" != "passed" ]]; then
-      notify "✅ CI Passed — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
+      if [[ "$READ_ONLY" != true ]]; then
+        notify "✅ CI Passed — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
+      fi
     fi
-    set_state "${state_prefix}_ci_state" "$ci_state"
+    if [[ "$READ_ONLY" != true ]]; then
+      set_state "${state_prefix}_ci_state" "$ci_state"
+    fi
   fi
 
   # ── 2. Check for new human reviews (changes_requested or commented) ─────
@@ -383,14 +431,20 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
 
       case "$review_state" in
         CHANGES_REQUESTED)
-          notify "🔃 Changes Requested — ${short_repo}#${pr_number}" "${reviewer} requested changes" "$pr_url" "pr-${pr_number}"
+          if [[ "$READ_ONLY" != true ]]; then
+            notify "🔃 Changes Requested — ${short_repo}#${pr_number}" "${reviewer} requested changes" "$pr_url" "pr-${pr_number}"
+          fi
           ;;
         COMMENTED)
-          notify "💬 Review Comment — ${short_repo}#${pr_number}" "${reviewer} left a review" "$pr_url" "pr-${pr_number}"
+          if [[ "$READ_ONLY" != true ]]; then
+            notify "💬 Review Comment — ${short_repo}#${pr_number}" "${reviewer} left a review" "$pr_url" "pr-${pr_number}"
+          fi
           ;;
       esac
     done
-    set_state "${state_prefix}_last_review_id" "$latest_review_id"
+    if [[ "$READ_ONLY" != true ]]; then
+      set_state "${state_prefix}_last_review_id" "$latest_review_id"
+    fi
   fi
 
   # ── 3. Check for new issue comments (non-bot, non-self) ─────────────────
@@ -410,9 +464,13 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
         continue
       fi
       body=$(echo "$comment" | jq -r '.body')
-      notify "💬 Comment — ${short_repo}#${pr_number}" "${commenter}: ${body}" "$pr_url" "pr-${pr_number}"
+      if [[ "$READ_ONLY" != true ]]; then
+        notify "💬 Comment — ${short_repo}#${pr_number}" "${commenter}: ${body}" "$pr_url" "pr-${pr_number}"
+      fi
     done
-    set_state "${state_prefix}_last_comment_id" "$latest_comment_id"
+    if [[ "$READ_ONLY" != true ]]; then
+      set_state "${state_prefix}_last_comment_id" "$latest_comment_id"
+    fi
   fi
 
   # ── 4. Ready to merge detection ─────────────────────────────────────────
@@ -424,11 +482,30 @@ echo "$search_json" | jq -c '.[]' | while IFS= read -r pr; do
   fi
 
   if [[ "$is_ready" == "true" && "$prev_ready" != "true" ]]; then
-    notify "🚀 Ready to Merge! — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
+    if [[ "$READ_ONLY" != true ]]; then
+      notify "🚀 Ready to Merge! — ${short_repo}#${pr_number}" "${pr_title}" "$pr_url" "pr-${pr_number}"
+    fi
   fi
-  set_state "${state_prefix}_ready_to_merge" "$is_ready"
+  if [[ "$READ_ONLY" != true ]]; then
+    set_state "${state_prefix}_ready_to_merge" "$is_ready"
+  fi
+
+  jq -n -c \
+    --arg repo "$repo" --argjson number "$pr_number" --arg title "$pr_title" \
+    --arg url "$pr_url" --arg is_draft "$is_draft" \
+    --arg ci_state "$ci_state" --arg review_decision "$review_decision" \
+    --arg ready_to_merge "$is_ready" \
+    --argjson last_review_id "$latest_review_id" --argjson last_comment_id "$latest_comment_id" \
+    '{repo: $repo, number: $number, title: $title, url: $url,
+      is_draft: ($is_draft == "true"), ci_state: $ci_state,
+      review_decision: $review_decision, ready_to_merge: ($ready_to_merge == "true"),
+      last_review_id: $last_review_id, last_comment_id: $last_comment_id}' \
+    >> "$authored_snapshot_tmp"
 
 done
+
+authored_prs_json=$(jq -s '.' "$authored_snapshot_tmp" 2>/dev/null || echo "[]")
+rm -f "$authored_snapshot_tmp"
 
 # ─── 5. Watched PRs: label + review-requested monitoring ─────────────────────
 
@@ -460,16 +537,33 @@ if (( ${#watch_scopes[@]} > 0 )); then
         result=$(gh api -X GET "search/issues" \
           -f q="is:pr is:open ${scope} label:\"${label}\"" \
           -f per_page=50 \
-          --jq '[.items[] | {
-            number: .number,
-            title: .title,
-            url: .html_url,
-            repo: (.repository_url | split("/") | .[-2] + "/" + .[-1])
-          }]' \
+          --jq '.items' \
           2>/dev/null || echo "[]")
-        labeled_prs=$(echo "${labeled_prs}" "${result}" | jq -s 'add | unique_by("\(.repo)#\(.number)")')
+        # Tag each match with the specific label that found it (a PR can match
+        # more than one watched label), so duplicates carry distinct tags to
+        # merge below rather than being silently deduped away.
+        tagged=$(echo "$result" | jq --arg label "$label" '[.[] | {
+          number: .number,
+          title: .title,
+          url: .html_url,
+          repo: (.repository_url | split("/") | .[-2] + "/" + .[-1]),
+          matched_labels: [$label]
+        }]')
+        labeled_prs=$(echo "${labeled_prs}" "${tagged}" | jq -s 'add')
       done
     done
+    # Merge duplicate repo#number entries (same PR matched multiple labels or
+    # scopes), combining their matched_labels into one deduped array.
+    labeled_prs=$(echo "$labeled_prs" | jq '
+      group_by("\(.repo)#\(.number)") |
+      map({
+        number: .[0].number,
+        title: .[0].title,
+        url: .[0].url,
+        repo: .[0].repo,
+        matched_labels: (map(.matched_labels) | add | unique)
+      })
+    ')
     log "Watched labels: found $(echo "$labeled_prs" | jq 'length') open PRs"
   fi
 
@@ -513,7 +607,9 @@ if (( ${#watch_scopes[@]} > 0 )); then
     pr_title=$(echo "$pr" | jq -r '.title')
     pr_url=$(echo "$pr" | jq -r '.url')
     short_repo=$(echo "$repo" | cut -d/ -f2)
-    notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+    if [[ "$READ_ONLY" != true ]]; then
+      notify "🏷️ Design Review — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+    fi
   done
 
   # Review-requested PRs: same manual vs auto logic.
@@ -527,7 +623,9 @@ if (( ${#watch_scopes[@]} > 0 )); then
     pr_title=$(echo "$pr" | jq -r '.title')
     pr_url=$(echo "$pr" | jq -r '.url')
     short_repo=$(echo "$repo" | cut -d/ -f2)
-    notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+    if [[ "$READ_ONLY" != true ]]; then
+      notify "👀 Review Requested — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+    fi
   done
 
   # ── 5d. Closure/merge detection ───────────────────────────────────────────
@@ -553,7 +651,9 @@ if (( ${#watch_scopes[@]} > 0 )); then
       if [[ "$pr_state" == "CLOSED" || "$pr_state" == "MERGED" ]]; then
         state_emoji="✅"
         [[ "$pr_state" == "MERGED" ]] && state_emoji="🎉"
-        notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+        if [[ "$READ_ONLY" != true ]]; then
+          notify "${state_emoji} PR ${pr_state} — ${short_repo}#${num}" "${pr_title}" "$pr_url" "pr-${short_repo}-${num}"
+        fi
       else
         log "PR ${repo}#${num} left watched set (label removed or review dismissed)"
       fi
@@ -561,9 +661,16 @@ if (( ${#watch_scopes[@]} > 0 )); then
   done
 
   # ── 5e. Update state ──────────────────────────────────────────────────────
-  set_state "watched_labeled_prs" "$(echo "$labeled_prs" | jq -c '.')"
-  set_state "watched_review_prs" "$(echo "$review_prs" | jq -c '.')"
+  if [[ "$READ_ONLY" != true ]]; then
+    set_state "watched_labeled_prs" "$(echo "$labeled_prs" | jq -c '.')"
+    set_state "watched_review_prs" "$(echo "$review_prs" | jq -c '.')"
+  fi
 
+fi
+
+write_snapshot "$authored_prs_json" "${labeled_prs:-[]}" "${review_prs:-[]}"
+if [[ "$JSON_MODE" == true ]]; then
+  cat "$SNAPSHOT_FILE"
 fi
 
 log "Poll cycle complete"

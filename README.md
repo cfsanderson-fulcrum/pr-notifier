@@ -107,6 +107,12 @@ It does **not** notify for:
 # One-shot check: notify about ALL currently matching watched PRs
 ./pr-notifier --check
 
+# One-shot JSON snapshot of authored + watched PRs (read-only)
+./pr-notifier --json | jq .
+
+# View the last-written snapshot
+jq . ~/.local/share/pr-notifier/snapshot.json
+
 # View the log
 cat ~/.local/share/pr-notifier/pr-notifier.log
 
@@ -135,6 +141,25 @@ each one. Unlike the normal poll mode, it does **not** compare against
 previous state — you get notified about everything it finds. It also does
 **not** update state, so the next normal poll cycle is unaffected.
 
+### `--json` mode
+
+Running `./pr-notifier --json` writes a combined snapshot of authored PRs
+(with CI/review status and ready-to-merge) plus both watched-PR sets to
+`~/.local/share/pr-notifier/snapshot.json`, and also prints it to stdout.
+Like `--check`, it's read-only — no notifications, no state updates — but
+it additionally covers authored PRs. This snapshot is also written as a
+side effect of every normal run (manual or `--auto`), so the file stays
+fresh on the regular 2-minute schedule without needing `--json` at all;
+the flag is mainly for on-demand refresh or piping into `jq`. It's handy
+for feeding PR status into a tool that can't run `gh` itself — e.g.
+dragging the file into a Claude Desktop chat. The snapshot includes a
+`last_synced_at` timestamp so a consumer can tell how fresh it is.
+
+If a tool can only read files inside a specific folder (e.g. a Claude
+Desktop/Cowork connected project, which can't reach `~/.local/share`), set
+`PR_NOTIFIER_COWORK_SNAPSHOT_FILE` to a path inside that folder — every
+write then produces two byte-identical, atomically-written copies.
+
 ## Configuration
 
 All settings can be overridden via environment variables.
@@ -149,6 +174,8 @@ All settings can be overridden via environment variables.
 | `PR_NOTIFIER_WATCHED_ORG` | _(empty)_ | Org to watch for labels/reviews (used if no repos are set) |
 | `PR_NOTIFIER_STATE_DIR` | `~/.local/share/pr-notifier` | Directory for state and log files |
 | `PR_NOTIFIER_MAX_LOG_LINES` | `500` | Log file rotation threshold |
+| `PR_NOTIFIER_SNAPSHOT_FILE` | `${STATE_DIR}/snapshot.json` | Path for the combined JSON snapshot written every run |
+| `PR_NOTIFIER_COWORK_SNAPSHOT_FILE` | _(none — disabled)_ | Optional second copy of the snapshot, for tools that can only read a specific folder |
 
 `IGNORED_USERS` and the poll interval (launchd `StartInterval`) are configured
 in the script and plist respectively.
@@ -160,6 +187,7 @@ in the script and plist respectively.
 | `pr-notifier` | The polling script |
 | `com.user.pr-notifier.plist` | Example launchd plist (copy to `~/Library/LaunchAgents/`) |
 | `~/.local/share/pr-notifier/state.json` | Tracked state between runs |
+| `~/.local/share/pr-notifier/snapshot.json` | Combined JSON snapshot of authored + watched PRs, refreshed every run |
 | `~/.local/share/pr-notifier/pr-notifier.log` | Application log |
 | `~/.local/share/pr-notifier/launchd-stdout.log` | launchd stdout |
 | `~/.local/share/pr-notifier/launchd-stderr.log` | launchd stderr |
