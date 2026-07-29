@@ -160,7 +160,16 @@ write_snapshot() {
 
   if [[ -n "$COWORK_SNAPSHOT_FILE" ]]; then
     mkdir -p "$(dirname "$COWORK_SNAPSHOT_FILE")"
-    echo "$snapshot" > "${COWORK_SNAPSHOT_FILE}.tmp" && mv "${COWORK_SNAPSHOT_FILE}.tmp" "$COWORK_SNAPSHOT_FILE"
+    # Some launchd contexts cannot create/rename temp files in protected
+    # folders (e.g. Documents). Fall back to direct overwrite so Cowork still
+    # gets a fresh, readable file.
+    if ! (echo "$snapshot" > "${COWORK_SNAPSHOT_FILE}.tmp" && mv "${COWORK_SNAPSHOT_FILE}.tmp" "$COWORK_SNAPSHOT_FILE"); then
+      if echo "$snapshot" > "$COWORK_SNAPSHOT_FILE"; then
+        log "WARN: Atomic Cowork snapshot write failed; used direct overwrite at ${COWORK_SNAPSHOT_FILE}"
+      else
+        log "ERROR: Failed to write Cowork snapshot at ${COWORK_SNAPSHOT_FILE}"
+      fi
+    fi
   fi
 }
 
