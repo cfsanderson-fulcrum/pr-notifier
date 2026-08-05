@@ -26,7 +26,7 @@
     <key>PR_NOTIFIER_WATCHED_LABELS</key>
     <string>design,hold/design</string>
     <key>PR_NOTIFIER_WATCHED_REPOS</key>
-    <string>fulcrumapp/fulcrum,fulcrumapp/fulcrum-ios,fulcrumapp/fulcrum-android</string>
+    <string>fulcrumapp/fulcrum,fulcrumapp/fulcrum-ios,fulcrumapp/fulcrum-android,fulcrumapp/plugins-design-skills</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
